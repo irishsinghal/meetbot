@@ -6,6 +6,7 @@ export async function startMockOllama({ model = 'qwen2.5:7b-instruct', fail = fa
     let body = ''; req.on('data', (c) => { body += c; });
     req.on('end', () => {
       if (req.url === '/api/tags') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ models: [{ name: model }] })); return; }
+      if (req.url === '/api/generate') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}'); return; }
       const j = JSON.parse(body); requests.push(j);
       if (fail) { res.writeHead(500); res.end('boom'); return; }
       if (j.model !== model) { res.writeHead(404); res.end('{}'); return; }

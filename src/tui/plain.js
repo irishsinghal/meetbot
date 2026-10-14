@@ -22,6 +22,8 @@ export async function runPlain(session, { autoStart = true, input = process.stdi
   say('MeetBot (plain mode). Type notes + Enter; /help for commands.');
   if (autoStart) { for (const m of await runCommand(session, '/start')) say(m.text); } else say('Type /start to begin.');
   const result = await done;
+  if (session.finalizing) say('Saved a draft; improving the transcript and summary...');
+  await session.whenFinalized();
   clearInterval(timer); flush(true); rl.close();
   say(`\nSaved to ${result.dir}\n  transcript.md · personal-notes.md · summary.md${result.warning ? `\n! ${result.warning}` : ''}`);
   return result;

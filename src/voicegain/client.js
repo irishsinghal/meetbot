@@ -24,12 +24,14 @@ export function toHints(words = [], weight = 6) {
 /** Request body for POST /sa. Channel layout: LEFT = your microphone, RIGHT = system audio (remote side). */
 export function buildSessionRequest(cfg, { title = '', hints = [], diarization = cfg.voicegain.diarization, tags = [] } = {}) {
   const v = cfg.voicegain;
-  const asr = { languages: [v.language], optimizedFor: v.optimizedFor, content: v.content };
+  const asr = { languages: [v.language], content: v.content };
+  if (v.optimizedFor) asr.optimizedFor = v.optimizedFor; // Ascalon rejects this field, so it is off by default
   if (v.model) asr.acousticModelRealTime = v.model;
   const h = toHints(hints);
   if (h.length) asr.hints = h;
   if (diarization) asr.diarization = { minSpeakers: 1, maxSpeakers: v.maxSpeakers };
   const body = {
+    asyncMode: 'REAL-TIME',
     label: safeLabel(title) || undefined,
     tags: ['meetbot', ...tags].slice(0, 32),
     persist: v.persist,
@@ -54,8 +56,9 @@ export async function createSession(cfg, body, fetchImpl = fetch) {
   const v = cfg.voicegain;
   if (!v.jwt) throw new VoicegainError('No Voicegain JWT. Set the VOICEGAIN_JWT environment variable.');
   let res;
+  const url = `${v.baseUrl.replace(/\/$/, '')}/sa`;
   try {
-    res = await fetchImpl(`${v.baseUrl.replace(/\/$/, '')}/sa`, {
+    res = await fetchImpl(url, {
       method: 'POST',
       headers: { Authorization: `Bearer ${v.jwt}`, 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify(body),
@@ -67,7 +70,7 @@ export async function createSession(cfg, body, fetchImpl = fetch) {
   let json; try { json = JSON.parse(text); } catch { json = null; }
   if (!res.ok) {
     const reason = json?.error?.reason; const detail = json?.error?.detail;
-    let msg = `Voicegain ${res.status}: ${reason || res.statusText}${detail ? ` - ${detail}` : ''}`;
+    let msg = `Voicegain ${res.status}: ${reason || res.statusText}${detail ? ` - ${detail}` : ''} [POST ${url}] ${text.slice(0, 300)}`;
     if (res.status === 401) msg += ' (check VOICEGAIN_JWT; it may have expired)';
     if (res.status === 400 && !v.saConfig) msg += ' (set VOICEGAIN_SA_CONFIG to a Speech Analytics config id from the Voicegain console)';
     throw new VoicegainError(redact(msg, cfg), { status: res.status, reason, detail });

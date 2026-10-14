@@ -72,7 +72,7 @@ test('buildSessionRequest follows the /sa schema: stereo L16 16k, left=mic right
   assert.deepEqual(r.speakerChannels.map((x) => x.audioChannelSelector), ['left', 'right']);
   assert.equal(r.virtualDualChannelEnabled, false);
   assert.deepEqual(r.asr.hints, ['Priya_Shah:6', 'Kubernetes:6', 'RD:6']);
-  assert.equal(r.asr.content, 'words'); assert.deepEqual(r.asr.languages, ['en-us']); assert.equal(r.asr.diarization, undefined);
+  assert.equal(r.asr.content, 'segments'); assert.deepEqual(r.asr.languages, ['en-us']); assert.equal(r.asr.diarization, undefined);
   c.voicegain.diarization = true; c.voicegain.maxSpeakers = 4;
   assert.deepEqual(buildSessionRequest(c).asr.diarization, { minSpeakers: 1, maxSpeakers: 4 });
   assert.equal(toHints(Array.from({ length: 80 }, (_, i) => `w${i}`)).length, 50);
@@ -177,4 +177,38 @@ test('tui helpers: wrap and transcript rows', () => {
   assert.deepEqual(wrap('aaa bbb ccc', 7), ['aaa bbb', 'ccc']); assert.deepEqual(wrap('x'.repeat(10), 4), ['xxxx', 'xxxx', 'xx']);
   const rows = transcriptRows([{ t: 0, tEnd: 1, speaker: 'You', text: 'hello', live: false }, { t: 2, tEnd: 3, speaker: 'You', text: 'again', live: true }], 40, 'You');
   assert.equal(rows[0].prefix, '00:00 You: '); assert.equal(rows[0].text, 'hello again'); assert.equal(rows[0].dim, true);
+});
+
+test('saveConfig merges into an existing config.json', async () => {
+  const { saveConfig } = await import('../src/setup.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-setup-'));
+  saveConfig({ me: 'A', voicegain: { saConfig: 'x' } }, dir);
+  saveConfig({ voicegain: { jwt: 'j' } }, dir);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')), { me: 'A', voicegain: { saConfig: 'x', jwt: 'j' } });
+});
+
+test('folder layouts and migration between them', async () => {
+  const { MeetingFolder, planMigration, applyMigration, findMeetings } = await import('../src/storage.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-layout-'));
+  const d1 = new Date(2026, 9, 14, 13, 30, 37); const d2 = new Date(2026, 9, 14, 15, 0, 0); const d3 = new Date(2026, 9, 15, 9, 5, 1);
+  for (const d of [d1, d2, d3]) { const f = new MeetingFolder(root, d, 'flat'); f.writeMeta({ startedAt: d.toISOString() }); f.write('summary.md', 'x'); }
+  assert.ok(fs.existsSync(path.join(root, '2026-10-14_13-30-37')));
+  assert.equal(planMigration(root, 'flat').length, 0);
+
+  assert.equal(applyMigration(root, planMigration(root, 'day')).moved, 3);
+  assert.ok(fs.existsSync(path.join(root, '2026-10-14', '13-30-37', 'summary.md')));
+  assert.ok(fs.existsSync(path.join(root, '2026-10-15', '09-05-01', '.data', 'meeting.json')));
+  assert.equal(fs.readdirSync(root).length, 2); // flat folders are gone
+  assert.equal(planMigration(root, 'day').length, 0);
+
+  assert.equal(applyMigration(root, planMigration(root, 'nested')).moved, 3);
+  assert.ok(fs.existsSync(path.join(root, '2026', '10', '14', '15-00-00', 'summary.md')));
+  assert.deepEqual(fs.readdirSync(root), ['2026']); // emptied day folders were removed
+  assert.equal(findMeetings(root).length, 3);
+
+  assert.equal(applyMigration(root, planMigration(root, 'flat')).moved, 3);
+  assert.deepEqual(fs.readdirSync(root).sort(), ['2026-10-14_13-30-37', '2026-10-14_15-00-00', '2026-10-15_09-05-01']);
+  // a new meeting at an occupied time gets a suffix
+  assert.ok(new MeetingFolder(root, d1, 'day').dir.endsWith(path.join('2026-10-14', '13-30-37')));
+  assert.ok(new MeetingFolder(root, d1, 'flat').dir.endsWith('_2'));
 });

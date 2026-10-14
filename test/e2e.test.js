@@ -25,7 +25,7 @@ function setup(vg, ol, extra = {}) {
   const session = new MeetingSession(cfg, { sourceFactory: () => new FileSource(wav, { speed: 10 }) });
   return { cfg, session, wav };
 }
-const finish = async (session) => { await new Promise((r) => session.once('source-end', r)); return session.stop(); };
+const finish = async (session) => { if (!session.sourceEnded) await new Promise((r) => session.once('source-end', r)); const r = await session.stop(); await session.whenFinalized(); return r; };
 
 test('full meeting: live transcript, speakers, notes, three output files, local summary', async (t) => {
   const vg = await startMockVoicegain({ scripts: [meetingScript()] }); const ol = await startMockOllama(); t.after(() => Promise.all([vg.close(), ol.close()]));
@@ -39,7 +39,7 @@ test('full meeting: live transcript, speakers, notes, three output files, local 
   await waitFor(() => session.clockSec() >= 6.5); await runCommand(session, '/d Ship the Q3 plan in November'); await runCommand(session, 'Budget looks tight');
   const r = await finish(session);
 
-  assert.match(path.basename(r.dir), /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/);
+  assert.match(path.relative(session.cfg.outputDir, r.dir).split(path.sep).join('/'), /^\d{4}-\d{2}-\d{2}\/\d{2}-\d{2}-\d{2}$/); // default layout: <date>/<time>
   assert.deepEqual(fs.readdirSync(r.dir).filter((f) => !f.startsWith('.')).sort(), ['personal-notes.md', 'summary.md', 'transcript.md']);
   assert.ok(seenLive.length > 3, 'transcript events arrived while the meeting ran');
 
@@ -191,9 +191,76 @@ test('CLI plain mode end to end (spawned process, mock servers, WAV replay)', as
   setTimeout(() => p.stdin.write('typed from the terminal\n/a follow up\n'), 800);
   const code = await new Promise((r) => p.on('close', r));
   assert.equal(code, 0, stdout);
-  const dir = path.join(out, fs.readdirSync(out)[0]);
+  const dir = (await import('../src/storage.js')).findMeetings(out)[0].dir;
   assert.match(fs.readFileSync(path.join(dir, 'personal-notes.md'), 'utf8'), /typed from the terminal/);
   assert.match(fs.readFileSync(path.join(dir, 'transcript.md'), 'utf8'), /Hello everyone welcome\./);
   assert.match(fs.readFileSync(path.join(dir, 'summary.md'), 'utf8'), /^# CLI test/);
   assert.match(stdout, /Hello everyone welcome\./); assert.match(stdout, /Saved to /);
+});
+
+test('recording on: audio kept during the call, refined transcript uses live speakers, recording deleted afterwards', async (t) => {
+  const vg = await startMockVoicegain({ scripts: [meetingScript()] }); const ol = await startMockOllama(); t.after(() => Promise.all([vg.close(), ol.close()]));
+  const { cfg, session } = setup(vg, ol);
+  cfg.recording.enabled = true; session.recordAudio = true;
+  let refineArgs = null;
+  session.deps.sttReady = () => true;
+  session.deps.refine = async (a) => { refineArgs = { exists: fs.existsSync(a.audioPath), size: fs.statSync(a.audioPath).size, live: a.liveLines.length };
+    return [{ t: 0, tEnd: 2, speaker: 'Priya', text: 'Hello everyone, welcome.', chn: 1, live: false }]; };
+  session.addPerson('Priya'); await session.start();
+  const dir = session.folder.dir;
+  await waitFor(() => session.clockSec() >= 0.4); session.setSpeaker('Priya');
+  assert.equal(session.setRecordAudio(false), false, 'cannot be switched once the call started');
+  const r = await finish(session);
+  assert.ok(refineArgs.exists && refineArgs.size > 0 && refineArgs.live > 0);
+  assert.equal(fs.existsSync(path.join(dir, '.data', 'audio.pcm')), false, 'recording deleted after a successful transcription');
+  assert.match(fs.readFileSync(r.files.transcript, 'utf8'), /Priya:\*\* Hello everyone, welcome\./);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, '.data', 'meeting.json'), 'utf8')).audio, false);
+});
+
+test('recording on but the local pass fails: live transcript stays and the recording is kept for a retry', async (t) => {
+  const vg = await startMockVoicegain({ scripts: [meetingScript()] }); const ol = await startMockOllama(); t.after(() => Promise.all([vg.close(), ol.close()]));
+  const { session } = setup(vg, ol);
+  session.recordAudio = true; session.deps.sttReady = () => true; session.deps.refine = async () => { throw new Error('boom'); };
+  await session.start(); const dir = session.folder.dir;
+  const r = await finish(session);
+  assert.ok(fs.existsSync(path.join(dir, '.data', 'audio.pcm')));
+  assert.match(r.warning, /meetbot retranscribe/); assert.match(fs.readFileSync(r.files.transcript, 'utf8'), /Hello everyone/);
+});
+
+test('recording is not started when local transcription is not installed', async (t) => {
+  const vg = await startMockVoicegain({ scripts: [meetingScript()] }); const ol = await startMockOllama(); t.after(() => Promise.all([vg.close(), ol.close()]));
+  const { session } = setup(vg, ol);
+  session.recordAudio = true; session.deps.sttReady = () => false;
+  await session.start(); assert.equal(session.recordAudio, false); assert.equal(fs.existsSync(path.join(session.folder.dir, '.data', 'audio.pcm')), false);
+  await finish(session);
+});
+
+test('someone says your name: a mention is raised with the reason and saved as a flag note; /catchup recaps', async (t) => {
+  const vg = await startMockVoicegain({ scripts: [meetingScript()] }); const ol = await startMockOllama(); t.after(() => Promise.all([vg.close(), ol.close()]));
+  const { session } = setup(vg, ol);
+  session.deps.explainMention = async ({ mention }) => ({ why: `${mention.speaker} wants the deck`, needsResponse: true });
+  session.deps.catchUp = async ({ lines }) => ({ summary: [`${lines.length} lines so far`], asked: 'send the deck', topic: 'budget', from: 0, to: 5 });
+  const mentions = []; session.on('mention', (m) => mentions.push(m));
+  session.cfg.me = 'Anil'; session.book.me = 'Anil'; session.addPerson('Priya');
+  await session.start(); await waitFor(() => session.clockSec() >= 0.4); session.setSpeaker('Priya');
+  await waitFor(() => mentions.some((m) => m.why), 12000);
+  const m = mentions.find((x) => x.why); assert.match(m.quote, /Anil will send the deck/); assert.equal(m.needsResponse, true);
+  assert.ok(session.notes.some((n) => n.kind === 'flag' && /wants the deck/.test(n.text)));
+  const out = await runCommand(session, '/catchup 3'); assert.match(out[0].text, /send the deck/);
+  await finish(session);
+});
+
+test('stopping is instant: a draft is saved first, the model summary replaces it in the background', async (t) => {
+  const vg = await startMockVoicegain({ scripts: [meetingScript()] }); const ol = await startMockOllama(); t.after(() => Promise.all([vg.close(), ol.close()]));
+  const { session } = setup(vg, ol);
+  let release; const gate = new Promise((r) => { release = r; });
+  const real = session.deps.summarizer; session.deps.summarizer = async (a) => { await gate; return real(a); };
+  await session.start(); await waitFor(() => session.clockSec() >= 0.4);
+  if (!session.sourceEnded) await new Promise((r) => session.once('source-end', r));
+  const r = await session.stop();
+  assert.equal(r.draft, true); assert.equal(session.state, 'done');
+  assert.match(fs.readFileSync(r.files.summary, 'utf8'), /^> \*\*Draft:\*\*/);
+  assert.match(fs.readFileSync(r.files.transcript, 'utf8'), /Hello everyone/);   // transcript is there immediately
+  release(); await session.whenFinalized();
+  assert.equal(r.draft, false); assert.match(fs.readFileSync(r.files.summary, 'utf8'), /The team reviewed the Q3 budget\./);
 });

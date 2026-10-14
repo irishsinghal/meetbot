@@ -5,6 +5,7 @@ import { SpeakerBook } from './speakers.js';
 import { readJsonl } from './storage.js';
 import { fallbackSummary, summarize as realSummarize } from './summarize/index.js';
 import { loadTemplate } from './summarize/template.js';
+import { resolveTemplate } from './summarize/auto.js';
 import { TranscriptBuilder } from './voicegain/transcript.js';
 
 export function loadMeeting(dir, cfg) {
@@ -32,13 +33,14 @@ export function loadMeeting(dir, cfg) {
   const add = (n) => { if (n && !participants.includes(n)) participants.push(n); };
   if (book.mode !== 'room') add(book.me);
   book.roster.forEach(add); lines.forEach((l) => add(l.speaker));
-  return { meta: { title: meta.title || '', startedAt: new Date(meta.startedAt), durationSec: meta.durationSec || lastT, participants, template: meta.template }, lines, notes };
+  return { meta: { title: meta.title || '', startedAt: new Date(meta.startedAt), durationSec: meta.durationSec || lastT, participants, template: meta.template }, lines, notes, book };
 }
 
 /** Regenerate summary.md (the previous one is kept as summary.previous.md). */
-export async function resummarize(dir, cfg, { template, summarizer = realSummarize, fetchImpl = fetch, onProgress } = {}) {
-  const { meta, lines, notes } = loadMeeting(dir, cfg);
-  const tpl = loadTemplate(template || meta.template || cfg.template);
+export async function resummarize(dir, cfg, { template, summarizer = realSummarize, fetchImpl = fetch, onProgress, lines: linesOverride } = {}) {
+  const loaded = loadMeeting(dir, cfg);
+  const { meta, notes } = loaded; const lines = linesOverride || loaded.lines;
+  const tpl = loadTemplate(resolveTemplate(template || meta.template || cfg.template, { lines, me: loaded.book.me }));
   let md; let warning = '';
   try { md = (await summarizer({ cfg, meta, lines, notes, templateText: tpl.text, fetchImpl, onProgress })).markdown; } catch (e) { warning = e.message; md = fallbackSummary({ meta, notes, templateText: tpl.text, reason: e.message }); }
   const out = path.join(dir, 'summary.md');

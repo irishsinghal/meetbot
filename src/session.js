@@ -9,7 +9,12 @@ import { MeetingFolder } from './storage.js';
 import { SpeakerBook } from './speakers.js';
 import { fallbackSummary, summarize as realSummarize } from './summarize/index.js';
 import { loadTemplate } from './summarize/template.js';
+import { resolveTemplate } from './summarize/auto.js';
 import { redact } from './config.js';
+import { writeLog } from './errlog.js';
+import { catchUp as realCatchUp, catchUpText, explainMention as realExplain, mentionNames, mentionRegex, recentLines } from './catchup.js';
+import { warmModel } from './summarize/ollama.js';
+import { AUDIO_FILE, discardAudio, refineLines, sttReady } from './refine.js';
 import { VoicegainLink, startSession as realStartSession } from './voicegain/client.js';
 import { TranscriptBuilder } from './voicegain/transcript.js';
 
@@ -28,7 +33,17 @@ export class MeetingSession extends EventEmitter {
       summarizer: deps.summarizer || realSummarize,
       fetchImpl: deps.fetchImpl || fetch,
       now: deps.now || (() => new Date()),
+      refine: deps.refine || refineLines,
+      warm: deps.warm || ((c) => warmModel({ url: c.llm.url, model: c.llm.model })),
+      catchUp: deps.catchUp || realCatchUp,
+      explainMention: deps.explainMention || realExplain,
+      sttReady: deps.sttReady || (() => sttReady(cfg)),
     };
+    this.recordAudio = !!cfg.recording?.enabled; // per-call switch, initial value from config; changed with /record before the call starts
+    this._audio = null;
+    this.finalizing = false; this.finalized = null;
+    this.mentions = []; this._mentionSeen = new Set(); this._mentionTimer = null; this._lastMention = -1e9;
+    this.on('transcript', () => this._watchMentions());
     this.state = 'ready';                // ready | recording | paused | stopping | done
     this.title = ''; this.templateName = cfg.template;
     this.book = new SpeakerBook({ me: cfg.me });
@@ -43,18 +58,78 @@ export class MeetingSession extends EventEmitter {
   }
 
   // ---------- small helpers ----------
-  log(level, text) { const e = { level, text: redact(text, this.cfg), at: Date.now() }; this.logs.push(e); if (this.logs.length > 200) this.logs.shift(); this.emit('log', e); }
+  log(level, text) { const e = { level, text: redact(text, this.cfg), at: Date.now() }; this.logs.push(e); writeLog(level, e.text); if (this.logs.length > 200) this.logs.shift(); this.emit('log', e); }
   clockSec() { return this.bytes / BYTES_PER_SEC; }
   _setState(s) { this.state = s; this.emit('state', s); }
   _setLink(s) { this.linkState = s; this.emit('link', s); }
   _event(obj) { try { this.folder?.appendJsonl('events.jsonl', { ...obj, at: this.clockSec() }); } catch { /* disk full etc: never crash the meeting */ } }
   _save(name, obj) { try { this.folder?.appendJsonl(name, obj); } catch { /* ignore */ } }
 
+  /** Per-call switch for keeping the audio for a post-call local transcription. Only before the call starts. */
+  setRecordAudio(on) { if (this.state !== 'ready') return false; this.recordAudio = !!on; this.emit('state', this.state); return true; }
+
+  _openAudio() {
+    if (!this.recordAudio) return;
+    if (!this.deps.sttReady()) { this.recordAudio = false; this.log('warn', 'Audio is not being recorded: local transcription is not installed. Run "meetbot setup" to enable it.'); return; }
+    try {
+      const s = fs.createWriteStream(this.folder.data(AUDIO_FILE));
+      s.on('error', (e) => { if (this._audio) { this._audio = null; this.recordAudio = false; this.log('error', `Audio recording stopped: ${e.message}`); } });
+      this._audio = s; this._audioKept = true; this._writeMeta(); this._event({ type: 'audio', recorded: true });
+      this.log('info', 'Recording audio locally for a cleaner transcript after the call (deleted afterwards).');
+    } catch (e) { this.recordAudio = false; this.log('error', `Could not record audio: ${e.message}`); }
+  }
+
+  async _closeAudio() {
+    const s = this._audio; this._audio = null;
+    if (!s) return;
+    await new Promise((resolve) => { s.once('error', resolve); s.end(resolve); });
+  }
+
+  // ---------- live help: catch me up, tagged alerts ----------
+  /** What was just said (last `minutes` min), and whether anything was asked of you. Falls back to the raw lines if the model is down. */
+  async catchUp(minutes = 5) {
+    const lines = this.lines();
+    let r;
+    try { r = await this.deps.catchUp({ cfg: this.cfg, lines, me: this.book.me, minutes, fetchImpl: this.deps.fetchImpl }); } catch (e) {
+      const recent = recentLines(lines, minutes).slice(-8);
+      r = { summary: recent.map((l) => `${l.speaker}: ${l.text}`), asked: '', topic: '', from: recent[0]?.t ?? 0, to: recent.at(-1)?.tEnd ?? 0, fallback: `Local model unavailable (${e.message}); showing the last lines instead.` };
+    }
+    r.text = catchUpText(r) + (r.fallback ? `
+! ${r.fallback}` : '');
+    this.emit('catchup', r);
+    return r;
+  }
+
+  _watchMentions() {
+    const cfg = this.cfg.mentions || {};
+    if (cfg.enabled === false || this.state !== 'recording' || this._mentionTimer) return;
+    const re = mentionRegex(mentionNames(this.book.me, cfg.names));
+    if (!re) return;
+    const hit = this.lines().find((l) => !this._mentionSeen.has(l.id) && l.speaker !== this.book.me && !(l.chn === 0 && this.book.mode !== 'room') && re.test(l.text));
+    if (!hit) return;
+    this._mentionSeen.add(hit.id);
+    if (hit.t - this._lastMention < 20) return; // one alert per burst
+    this._lastMention = hit.t;
+    // Let the sentence finish before asking why.
+    this._mentionTimer = setTimeout(() => { this._mentionTimer = null; this._raiseMention(hit.id).catch(() => {}); }, 3500);
+  }
+
+  async _raiseMention(id) {
+    const lines = this.lines(); const l = lines.find((x) => x.id === id);
+    if (!l) return;
+    const m = { id, t: l.t, speaker: l.speaker, quote: l.text, why: '', needsResponse: false };
+    this.mentions.push(m); this.emit('mention', { ...m });
+    try { const r = await this.deps.explainMention({ cfg: this.cfg, lines, me: this.book.me, mention: m, fetchImpl: this.deps.fetchImpl }); m.why = String(r.why || '').trim(); m.needsResponse = !!r.needsResponse; } catch { /* model unavailable: the quote alone is shown */ }
+    this._event({ type: 'mention', id, speaker: m.speaker, quote: m.quote, why: m.why });
+    if (this.state === 'recording' || this.state === 'paused') this.addNote('flag', `Mentioned by ${m.speaker}: ${m.why || m.quote}`);
+    this.emit('mention', { ...m });
+  }
+
   // ---------- lifecycle ----------
   async start() {
     if (this.state !== 'ready') return false;
     this.startedAt = this.deps.now();
-    this.folder = new MeetingFolder(this.cfg.outputDir, this.startedAt);
+    this.folder = new MeetingFolder(this.cfg.outputDir, this.startedAt, this.cfg.folderLayout);
     this._writeMeta();
     this.notes.forEach((n) => this._save('notes.jsonl', n));
     this._event({ type: 'me', name: this.book.me }); this._event({ type: 'roster', roster: this.book.roster }); this._event({ type: 'mode', mode: this.book.mode });
@@ -71,6 +146,8 @@ export class MeetingSession extends EventEmitter {
       this.folder = null; this.source = null;
       throw e;
     }
+    this._openAudio();
+    this.deps.warm(this.cfg); // load the local model now so catch-up / tag alerts answer fast
     this._setState('recording');
     this._pendingOffset = 0;
     this._openLink();
@@ -111,6 +188,7 @@ export class MeetingSession extends EventEmitter {
       this.link = null;
     }
     this._setLink('idle');
+    await this._closeAudio();
     return this._finalize(summarize);
   }
 
@@ -120,6 +198,7 @@ export class MeetingSession extends EventEmitter {
     if (now - this._lastLevel > 120) { this._lastLevel = now; this.levels = stereoLevels(buf); this.emit('levels', this.levels); }
     if (this.state !== 'recording') return;
     this.bytes += buf.length;
+    if (this._audio) { try { this._audio.write(buf); } catch { /* never crash the meeting */ } }
     if (this.link?.healthy && !this.queue.length && this.link.sendAudio(buf)) return;
     this.queue.push(buf);
     if (this.queue.length > MAX_QUEUE) { this.queue.shift(); this._pendingOffset += buf.length; if (!this._warnedDrop) { this._warnedDrop = true; this.log('error', 'Voicegain unreachable for too long; oldest audio is being dropped.'); } }
@@ -162,16 +241,17 @@ export class MeetingSession extends EventEmitter {
     if (link !== this.link) return;
     this.link = null;
     if (this.state === 'recording') {
-      this.log('warn', `Voicegain connection lost (${info.which} socket${info.code ? `, code ${info.code}` : ''}). Reconnecting...`);
+      this.log('warn', `Voicegain connection lost (${info.which} socket${info.code ? `, code ${info.code}` : ''}${info.reason ? `, reason "${info.reason}"` : ''}, session ${link.s?.sessionId}). Reconnecting...`);
       this._pendingOffset = this.bytes; // frames from now on belong to the next session
-      this._setLink('reconnecting'); this._scheduleRetry();
+      // The server ends a session a few seconds after speech stops (clean close, code 1000): reopen right away.
+      this._setLink('reconnecting'); this._scheduleRetry(info.code === 1000 ? 100 : undefined);
     } else if (this.state === 'paused') this._setLink('idle');
   }
 
-  _scheduleRetry() {
-    if (this.retries >= RETRY_MS.length) { this._setLink('failed'); this.log('error', 'Gave up reconnecting to Voicegain. Audio keeps buffering; type /reconnect to try again.'); return; }
+  _scheduleRetry(delayMs) {
+    if (delayMs === undefined && this.retries >= RETRY_MS.length) { this._setLink('failed'); this.log('error', 'Gave up reconnecting to Voicegain. Audio keeps buffering; type /reconnect to try again.'); return; }
     this._setLink('reconnecting');
-    this._timer = setTimeout(() => { this.retries += 1; this._openLink(); }, RETRY_MS[this.retries]);
+    this._timer = setTimeout(() => { if (delayMs === undefined) this.retries += 1; this._openLink(); }, delayMs ?? RETRY_MS[this.retries]);
   }
 
   _onPayload(p) {
@@ -230,39 +310,70 @@ export class MeetingSession extends EventEmitter {
   }
 
   _writeMeta(extra = {}) {
-    this.folder?.writeMeta({ app: 'meetbot', title: this.title, startedAt: this.startedAt?.toISOString(), durationSec: this.clockSec(), template: this.templateName,
-      me: this.book.me, mode: this.book.mode, roster: this.book.roster, ...extra });
+    this.folder?.writeMeta({ app: 'meetbot', title: this.title, startedAt: this.startedAt?.toISOString(), durationSec: this.clockSec(), template: this.resolvedTemplate || this.templateName, kind: this.resolvedTemplate === 'voice-note' ? 'voice-note' : this.resolvedTemplate ? 'meeting' : undefined,
+      me: this.book.me, mode: this.book.mode, roster: this.book.roster, audio: !!this._audioKept, ...extra });
   }
 
   // ---------- outputs ----------
+  // Two phases so stopping feels instant: first the files exist at once (live transcript, notes, a draft summary with
+  // your notes), the session is "done" and the UI shows them; then, in the background, the local Whisper pass (if audio
+  // was recorded) and the model summary replace the draft. `finalized` resolves when that is complete; it never rejects.
   async _finalize(doSummary) {
     const lines = this.lines().map((l) => ({ ...l, live: false }));
     const meta = { title: this.title, startedAt: this.startedAt, durationSec: this.clockSec(), participants: this.participants(lines) };
     const files = { transcript: this.folder.file('transcript.md'), notes: this.folder.file('personal-notes.md'), summary: this.folder.file('summary.md') };
     this.folder.write('transcript.md', renderTranscript({ ...meta, lines }));
     this.folder.write('personal-notes.md', renderPersonalNotes({ title: this.title, startedAt: this.startedAt, notes: this.notes }));
-    this._writeMeta({ participants: meta.participants });
 
-    let tpl; let warning = '';
-    try { tpl = loadTemplate(this.templateName); } catch (e) { warning = e.message; tpl = loadTemplate('general-meeting'); }
-    let summary; let title = this.title;
-    if (!doSummary) summary = fallbackSummary({ meta, notes: this.notes, templateText: tpl.text, reason: 'skipped (--no-summary)' });
-    else {
-      try {
-        this.emit('progress', 'Summarizing with the local model...');
-        const r = await this.deps.summarizer({ cfg: this.cfg, meta, lines, notes: this.notes, templateText: tpl.text, fetchImpl: this.deps.fetchImpl, onProgress: (m) => this.emit('progress', m) });
-        summary = r.markdown; title = this.title || r.title;
-      } catch (e) {
-        warning = `${warning} ${e.message}`.trim();
-        summary = fallbackSummary({ meta, notes: this.notes, templateText: tpl.text, reason: e.message });
-      }
-    }
-    this.folder.write('summary.md', summary);
-    if (title && !this.title) { this.title = title; this.folder.write('transcript.md', renderTranscript({ ...meta, title, lines })); this.folder.write('personal-notes.md', renderPersonalNotes({ title, startedAt: this.startedAt, notes: this.notes })); }
-    this._writeMeta({ participants: meta.participants, title: this.title });
-    this.result = { dir: this.folder.dir, files, warning, summaryText: summary, lines: lines.length, durationSec: meta.durationSec };
+    let warning = '';
+    this.resolvedTemplate = resolveTemplate(this.templateName, { lines, me: this.book.me });
+    let tpl; try { tpl = loadTemplate(this.resolvedTemplate); } catch (e) { warning = e.message; tpl = loadTemplate('general-meeting'); }
+    const audioPath = this.folder.data(AUDIO_FILE);
+    const refinePending = this.recordAudio && fs.existsSync(audioPath) && this.bytes > 0;
+    if (!this.recordAudio) { try { fs.rmSync(audioPath, { force: true }); } catch { /* ignore */ } }
+    const more = refinePending || doSummary;
+    const draft = fallbackSummary({ meta, notes: this.notes, templateText: tpl.text, reason: more ? '' : 'skipped (--no-summary)', draft: more });
+    this.folder.write('summary.md', draft);
+    this._writeMeta({ participants: meta.participants });
+    this.result = { dir: this.folder.dir, files, warning, summaryText: draft, lines: lines.length, durationSec: meta.durationSec, draft: more };
     this._setState('done');
     this.emit('done', this.result);
+    this.finalized = more ? this._improve({ lines, meta, tpl, doSummary, refinePending, audioPath }).catch((e) => this.log('error', `Finishing the notes failed: ${e.message}`)).then(() => { this.result.draft = false; this.emit('progress', ''); this.emit('finalized', this.result); return this.result; }) : Promise.resolve(this.result);
     return this.result;
   }
+
+  async _improve({ lines, meta, tpl, doSummary, refinePending, audioPath }) {
+    const r = this.result; const note = (w) => { r.warning = `${r.warning} ${w}`.trim(); };
+    this.finalizing = true;
+    try {
+      if (refinePending) {
+        try {
+          this.emit('progress', 'Improving the transcript locally...');
+          const refined = await this.deps.refine({ cfg: this.cfg, audioPath, liveLines: lines, book: this.book, hints: [...this.hints, ...this.book.roster, this.book.me], onProgress: (m) => this.emit('progress', m) });
+          lines = refined; meta.participants = this.participants(lines); r.lines = lines.length;
+          this.folder.write('transcript.md', renderTranscript({ ...meta, lines }));
+          discardAudio(this.folder.dir); this._audioKept = false;
+          this.resolvedTemplate = resolveTemplate(this.templateName, { lines, me: this.book.me });
+          try { tpl = loadTemplate(this.resolvedTemplate); } catch { /* keep the earlier template */ }
+        } catch (e) {
+          const w = `Local re-transcription failed (${e.message}); kept the live transcript and the recording. Retry with: meetbot retranscribe "${this.folder.dir}"`;
+          this.log('error', w); note(w);
+        }
+      }
+      let summary = r.summaryText; let title = this.title;
+      if (doSummary) {
+        try {
+          this.emit('progress', 'Writing the summary with the local model...');
+          const out = await this.deps.summarizer({ cfg: this.cfg, meta, lines, notes: this.notes, templateText: tpl.text, fetchImpl: this.deps.fetchImpl, onProgress: (m) => this.emit('progress', m) });
+          summary = out.markdown; title = this.title || out.title;
+        } catch (e) { note(e.message); summary = fallbackSummary({ meta, notes: this.notes, templateText: tpl.text, reason: e.message }); }
+      } else summary = fallbackSummary({ meta, notes: this.notes, templateText: tpl.text, reason: 'skipped (--no-summary)' });
+      this.folder.write('summary.md', summary); r.summaryText = summary;
+      if (title && !this.title) { this.title = title; this.folder.write('transcript.md', renderTranscript({ ...meta, title, lines })); this.folder.write('personal-notes.md', renderPersonalNotes({ title, startedAt: this.startedAt, notes: this.notes })); }
+      this._writeMeta({ participants: meta.participants, title: this.title });
+    } finally { this.finalizing = false; }
+  }
+
+  /** Resolves when the background improvement (Whisper pass + model summary) has finished. Never rejects. */
+  whenFinalized() { return this.finalized || Promise.resolve(this.result); }
 }

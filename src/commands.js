@@ -11,7 +11,7 @@ import { listTemplates, loadTemplate } from './summarize/template.js';
 
 export const HELP = [
   'NOTES      type + Enter = note   /a action   /d decision   /q question   /f flag this moment',
-  'CONTROL    /start  /pause  /resume  /stop  (/stop nosummary)   /reconnect   /status   /open',
+  'CONTROL    /start  /pause  /resume  /stop  (/stop nosummary)  /record on|off  /catchup [min]   /reconnect   /status   /open',
   'SPEAKERS   Tab / Shift+Tab = next/prev speaker   /speaker <#|name>   /relabel <#|name> (fix last line)',
   '           /add <name, name>  /rm <#|name>  /roster  /me <name>  /mode call|room  /name <Speaker N> <name>',
   'PRESETS    /preset list | save <n> | load <n> | rm <n>      /ics <file>  load attendees + title from an invite',
@@ -66,6 +66,16 @@ export async function runCommand(session, line) {
       if (!['recording', 'paused'].includes(session.state)) return [msg('Nothing to stop.', 'warn')];
       session.stop({ summarize: !/^no/i.test(arg) }).catch((e) => session.log('error', `Stop failed: ${e.message}`));
       return [msg('Stopping...')];
+    }
+    case '/record': {
+      if (!arg) return [msg(`Audio recording for a cleaner transcript after the call: ${session.recordAudio ? 'ON' : 'off'}. Use /record on or /record off (before the call starts).`)];
+      if (!/^(on|off)$/i.test(arg)) return [msg('Usage: /record on|off', 'warn')];
+      return session.setRecordAudio(/^on$/i.test(arg)) ? [msg(`Audio recording ${session.recordAudio ? 'ON: kept during the call, transcribed locally afterwards, then deleted.' : 'off.'}`)] : [msg('Recording can only be switched before the call starts.', 'warn')];
+    }
+    case '/catchup': case '/recap': case '/rewind': {
+      const mins = Number(arg) > 0 ? Number(arg) : 5;
+      const r = await session.catchUp(mins);
+      return session.richUi ? [] : [msg(r.text)];
     }
     case '/reconnect': return session.reconnect() ? [msg('Reconnecting to Voicegain...')] : [msg('Already connected or connecting.', 'warn')];
     case '/status': return [msg(`${session.state} | clock ${fmtClock(session.clockSec())} | Voicegain: ${session.linkState} | notes: ${session.notes.length} | queued frames: ${session.queue.length}`)];

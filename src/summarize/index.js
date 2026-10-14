@@ -96,7 +96,10 @@ export async function summarize({ cfg, meta, lines, notes, templateText, fetchIm
 }
 
 /** Used when the LLM is unavailable: keeps the file structure and your notes, marks AI sections as missing. */
-export function fallbackSummary({ meta, notes, templateText, reason }) {
+export function fallbackSummary({ meta, notes, templateText, reason, draft = false }) {
   const body = fillTemplate(templateText, builtinsFor(meta, notes), {});
+  if (draft) return `> **Draft:** your notes are below; the full summary is still being written and will replace this file.
+
+${body}`;
   return `> **Summary not generated:** ${reason}\n> Re-run with: \`meetbot summarize <this folder>\`\n\n${body}`;
 }

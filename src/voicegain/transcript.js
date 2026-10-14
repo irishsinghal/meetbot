@@ -57,7 +57,12 @@ export class TranscriptBuilder {
     this.lastMs = Math.max(this.lastMs, ww.end);
   }
 
-  _info(skey) { return this.speakers.get(skey) || { spk: Number(skey.split(':')[1]), chn: undefined, agent: false, diarized: false }; }
+  _info(skey) {
+    const known = this.speakers.get(skey); if (known) return known;
+    // Some servers (Ascalon) send no speaker[] messages: speaker 1 is then the left channel (mic), 2 the right (system).
+    const spk = Number(skey.split(':')[1]);
+    return { spk, chn: spk === 1 ? 0 : spk === 2 ? 1 : undefined, agent: false, diarized: false };
+  }
 
   /** All transcript lines in time order. `live` marks text that may still be revised (newer than liveMs). */
   lines(nowMs = this.lastMs, liveMs = 2500) {

@@ -5,6 +5,7 @@ import { jwtInfo } from './config.js';
 import { SIDECAR } from './audio/source.js';
 import { listModels } from './summarize/ollama.js';
 import { listTemplates } from './summarize/template.js';
+import { sttModel, sttReady } from './refine.js';
 
 export async function doctor(cfg) {
   const rows = []; const add = (ok, label, detail = '') => rows.push({ ok, label, detail });
@@ -30,6 +31,8 @@ export async function doctor(cfg) {
     const has = models.includes(cfg.llm.model) || models.some((m) => m.split(':')[0] === cfg.llm.model && !cfg.llm.model.includes(':'));
     add(has, 'Local model (Ollama)', has ? cfg.llm.model : `"${cfg.llm.model}" not installed. Run: ollama pull ${cfg.llm.model}   (installed: ${models.join(', ') || 'none'})`);
   } catch (e) { add(false, 'Local model (Ollama)', `not reachable at ${cfg.llm.url} - start Ollama (summaries need it; transcripts do not)`); }
+
+  if (cfg.recording?.enabled) { const ok = sttReady(cfg); add(ok, 'Local transcription (faster-whisper)', ok ? `ready (${sttModel(cfg)}); recording is on by default` : 'recording is on but faster-whisper is missing. Run: meetbot setup'); }
 
   try { fs.mkdirSync(cfg.outputDir, { recursive: true }); fs.accessSync(cfg.outputDir, fs.constants.W_OK); add(true, 'Output folder', cfg.outputDir); } catch (e) { add(false, 'Output folder', `${cfg.outputDir}: ${e.message}`); }
   add(true, 'Templates', `${listTemplates().join(', ')} (default: ${cfg.template})`);
