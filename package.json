@@ -1,0 +1,11 @@
+{
+  "name": "meetbot",
+  "version": "0.1.0",
+  "description": "Terminal meeting recorder + live notepad. Live transcription via Voicegain /sa, local summarization via Ollama.",
+  "type": "module",
+  "bin": { "meetbot": "bin/meetbot.js" },
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test --test-force-exit --test-timeout=60000 test/*.test.js", "start": "node bin/meetbot.js" },
+  "dependencies": { "htm": "^3.1.1", "ink": "^8.0.0", "react": "^19.3.0", "ws": "^8.18.0" },
+  "license": "MIT"
+}
