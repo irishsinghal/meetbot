@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import { HELP, runCommand } from '../commands.js';
 import { KINDS } from '../notes.js';
 import { fmtClock } from '../render.js';
+import { writeLog } from '../errlog.js';
 
 const html = htm.bind(React.createElement);
 const PALETTE = ['cyan', 'magenta', 'yellow', 'blue', 'green', 'redBright', 'cyanBright', 'magentaBright'];
@@ -181,7 +182,7 @@ function App({ session, autoStart, plainExit }) {
     <//>
     <${Box} paddingX=${1}>
       <${Text} dimColor>${session.book.mode === 'room' ? 'Speaker ' : 'Remote speaker '}<//>
-      ${roster.length ? roster.map((n, i) => html`<${Text} key=${n} inverse=${session.book.current === n} color=${colorFor(n, me)}> ${i + 1} ${n} <//>`) : html`<${Text} dimColor>(none — /add Name, Name · /preset load <name> · /ics file)<//>`}
+      ${roster.length ? roster.map((n, i) => html`<${Text} key=${n} inverse=${session.book.current === n} color=${colorFor(n, me)}> ${i + 1} ${n} <//>`) : html`<${Text} dimColor>${'(none — /add Name, Name · /preset load <name> · /ics file)'}<//>`}
       <${Text} dimColor>  Tab = next<//>
     <//>
     <${Box} paddingX=${1}><${Text} color=${statusColor} wrap="truncate-end">${confirm ? 'Press Ctrl+C again to stop and save the meeting' : status}<//><//>
@@ -193,6 +194,6 @@ function App({ session, autoStart, plainExit }) {
 export async function runTui(session, { autoStart = false } = {}) {
   session.on('progress', (t) => { session.progressText = t; });
   const inst = render(html`<${App} session=${session} autoStart=${autoStart} />`, { exitOnCtrlC: false });
-  await inst.waitUntilExit();
+  try { await inst.waitUntilExit(); } catch (e) { writeLog('fatal', `TUI crashed: ${e?.stack || e}`); throw e; }
   return session.result;
 }

@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeetBot</title>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --text:#1c2128; --dim:#6b7480; --line:#dde1e6; --accent:#2563eb; --rec:#d92d20; --warn:#b54708; --ok:#067647;
+          --action:#067647; --decision:#0e7490; --question:#a21caf; --flag:#b54708; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1318; --panel:#171c23; --text:#e6e9ed; --dim:#8b95a1; --line:#2a313a; --accent:#6ea0ff; --rec:#ff6b5e; --warn:#f0b24a; --ok:#4ade80;
+          --action:#4ade80; --decision:#38bdf8; --question:#e879f9; --flag:#f0b24a; } }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, "Segoe UI", sans-serif; display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .pill { font-weight: 700; padding: 2px 10px; border-radius: 999px; background: var(--line); font-size: 13px; letter-spacing: .03em; }
+  .pill.recording { background: var(--rec); color: #fff; } .pill.paused { background: var(--warn); color: #fff; }
+  #clock { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 18px; }
+  #title { flex: 1 1 200px; min-width: 120px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meter { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); font-size: 12px; }
+  .meter i { display: inline-block; width: 60px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  .meter b { display: block; height: 100%; width: 0; background: var(--ok); transition: width .1s; }
+  .link { font-size: 13px; color: var(--dim); } .link.connected { color: var(--ok); } .link.failed { color: var(--rec); } .link.reconnecting, .link.connecting { color: var(--warn); }
+  button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+  button:hover { border-color: var(--accent); } button.primary { background: var(--accent); border-color: var(--accent); color: #fff; } button.danger { color: var(--rec); }
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 12px; padding: 12px 16px; }
+  section { min-height: 0; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; position: relative; }
+  section > h2 { margin: 0; padding: 8px 14px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); border-bottom: 1px solid var(--line); }
+  .scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 14px 14px; overscroll-behavior: contain; }
+  .turn { margin: 0 0 10px; } .turn .who { font-weight: 700; } .turn .ts { color: var(--dim); font-size: 12px; margin-right: 6px; font-variant-numeric: tabular-nums; }
+  .turn.live .txt { color: var(--dim); }
+  .note { margin: 0 0 8px; padding-left: 10px; border-left: 3px solid var(--line); } .note .ts { color: var(--dim); font-size: 12px; margin-right: 6px; }
+  .note.action { border-color: var(--action); } .note.decision { border-color: var(--decision); } .note.question { border-color: var(--question); } .note.flag { border-color: var(--flag); }
+  .note .kind { font-weight: 700; margin-right: 4px; } .note.action .kind { color: var(--action); } .note.decision .kind { color: var(--decision); } .note.question .kind { color: var(--question); } .note.flag .kind { color: var(--flag); }
+  .empty { color: var(--dim); font-style: italic; }
+  #jump { position: absolute; right: 16px; bottom: 12px; display: none; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+  footer { padding: 0 16px 12px; display: flex; flex-direction: column; gap: 8px; }
+  #roster { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--dim); font-size: 13px; }
+  .chip { padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); cursor: pointer; background: var(--panel); color: var(--text); }
+  .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #status { min-height: 20px; font-size: 13px; color: var(--dim); white-space: pre-wrap; } #status.warn { color: var(--warn); } #status.error { color: var(--rec); }
+  form { display: flex; gap: 8px; flex-wrap: wrap; } #kinds { display: flex; gap: 4px; }
+  #kinds button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #input { flex: 1 1 260px; min-width: 0; font: inherit; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  #input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #help { display: none; white-space: pre-wrap; font: 12px/1.5 ui-monospace, Consolas, monospace; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  #done { display: none; margin: 12px 16px; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; max-height: 45vh; overflow: auto; }
+  #done pre { white-space: pre-wrap; font: inherit; margin: 8px 0 0; }
+  #alerts { position: fixed; top: 64px; right: 16px; width: min(420px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 8px; z-index: 5; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; padding: 10px 12px; box-shadow: 0 6px 20px rgba(0,0,0,.28); }
+  .card.mention { border-left-color: var(--flag); } .card h3 { margin: 0 0 4px; font-size: 14px; } .card ul { margin: 4px 0 4px 18px; padding: 0; } .card .ask { color: var(--flag); font-weight: 600; margin-top: 4px; }
+  .card .x { float: right; border: 0; background: none; color: var(--dim); padding: 0 4px; font-size: 16px; }
+  #offline { display: none; background: var(--rec); color: #fff; text-align: center; padding: 4px; font-size: 13px; }
+  @media (max-width: 560px) { /* narrow side window: keep the meeting visible next to it */
+    body { font-size: 14px; } header { gap: 6px 10px; padding: 6px 10px; } #title, .meter, #helpBtn { display: none; } #clock { font-size: 16px; }
+    main { gap: 8px; padding: 8px; } .scroll { padding: 6px 10px 10px; } footer { padding: 0 8px 8px; } #kinds button { padding: 4px 8px; font-size: 13px; }
+    button { padding: 4px 9px; } #alerts { top: 52px; right: 8px; width: calc(100vw - 16px); }
+  }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1.4fr) minmax(0, 1fr); padding: 8px; } header, footer { padding-left: 8px; padding-right: 8px; } }
+</style>
+</head>
+<body>
+<div id="alerts"></div>
+<div id="offline">Connection to MeetBot lost. Reconnecting…</div>
+<header>
+  <span id="state" class="pill">…</span><span id="clock">00:00</span><span id="title"></span>
+  <span class="meter">mic <i><b id="mic"></b></i></span><span class="meter">sys <i><b id="sys"></b></i></span>
+  <span id="link" class="link"></span>
+  <label id="recWrap" class="meter" title="Keep the call audio on this computer, transcribe it locally afterwards for a cleaner transcript, then delete it. Choose before starting."><input type="checkbox" id="rec"> Record audio</label>
+  <button id="catchup" title="Summarize the last few minutes (Ctrl+K)">Catch me up</button><button id="start" class="primary">Start</button><button id="pause">Pause</button><button id="stop" class="danger">Stop &amp; save</button><button id="helpBtn">Help</button>
+</header>
+<div id="done"></div>
+<main>
+  <section><h2>Transcript</h2><div id="transcript" class="scroll"></div><button id="jump">↓ Jump to live</button></section>
+  <section><h2>My notes</h2><div id="notes" class="scroll"></div></section>
+</main>
+<footer>
+  <div id="roster"></div>
+  <div id="help"></div>
+  <div id="status"></div>
+  <form id="form" autocomplete="off">
+    <div id="kinds"><button type="button" data-k="">Note</button><button type="button" data-k="/a">Action</button><button type="button" data-k="/d">Decision</button><button type="button" data-k="/q">Question</button><button type="button" data-k="/f">Flag</button></div>
+    <input id="input" placeholder="Type a note and press Enter · /help for commands" autofocus>
+    <button class="primary">Add</button>
+  </form>
+</footer>
+<script>
+const HELP = __HELP__;
+const $ = (id) => document.getElementById(id);
+const fmt = (s) => { s = Math.max(0, Math.floor(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; const p = (n) => String(n).padStart(2, '0'); return (h ? h + ':' : '') + p(m) + ':' + p(x); };
+const hue = (name) => { let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; };
+let ws, S = null, kind = '', hist = [], hpos = -1, follow = true, statusTimer, retry = 500;
+
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function say(text, level = 'info', ms = 6000) { const el = $('status'); el.textContent = text; el.className = level; clearTimeout(statusTimer); if (ms) statusTimer = setTimeout(() => { el.textContent = ''; }, ms); }
+
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + location.search);
+  ws.onopen = () => { $('offline').style.display = 'none'; retry = 500; };
+  ws.onclose = () => { $('offline').style.display = 'block'; setTimeout(connect, retry = Math.min(5000, retry * 2)); };
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'state') render(m);
+    else if (m.type === 'catchup') showCatchup(m);
+    else if (m.type === 'mention') showMention(m);
+    else if (m.type === 'reply') { const t = m.messages.map((x) => x.text).join('\n'); if (t) say(t, m.messages.some((x) => x.level === 'error') ? 'error' : m.messages.some((x) => x.level === 'warn') ? 'warn' : 'info'); }
+  };
+}
+
+function card(id, cls) {
+  let c = id && document.getElementById(id);
+  if (!c) { c = document.createElement('div'); if (id) c.id = id; $('alerts').prepend(c); }
+  c.className = 'card ' + cls; c.textContent = '';
+  const x = document.createElement('button'); x.className = 'x'; x.textContent = '×'; x.onclick = () => { c.remove(); if (!$('alerts').querySelector('.mention')) document.title = document.title.replace('🔔 ', ''); }; c.append(x);
+  return c;
+}
+function showCatchup(m) {
+  const c = card('catchupCard', 'catchup'); const h = document.createElement('h3'); h.textContent = 'Caught up' + (m.topic ? ' · ' + m.topic : '') + ' (' + fmt(m.from) + '–' + fmt(m.to) + ')'; c.append(h);
+  if (!m.summary.length && !m.asked) { c.append('Nothing has been said yet.'); return; }
+  const ul = document.createElement('ul'); for (const b of m.summary) { const li = document.createElement('li'); li.textContent = b; ul.append(li); } c.append(ul);
+  if (m.asked) { const a = document.createElement('div'); a.className = 'ask'; a.textContent = 'For you: ' + m.asked; c.append(a); }
+  if (m.fallback) { const f = document.createElement('div'); f.style.color = 'var(--dim)'; f.textContent = m.fallback; c.append(f); }
+}
+function showMention(m) {
+  const c = card('mention-' + m.id.replace(/\W/g, '_'), 'mention'); const h = document.createElement('h3'); h.textContent = '🔔 ' + m.speaker + ' mentioned you at ' + fmt(m.t) + (m.needsResponse ? ' — response expected' : ''); c.append(h);
+  const q = document.createElement('div'); q.style.color = 'var(--dim)'; q.textContent = '“' + m.quote + '”'; c.append(q);
+  const w = document.createElement('div'); w.className = 'ask'; w.textContent = m.why ? m.why : 'Working out why…'; c.append(w);
+  if (!document.title.startsWith('🔔')) document.title = '🔔 ' + document.title;
+}
+function nearBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeight < 40; }
+function renderTranscript(turns) {
+  const box = $('transcript'); const prevTop = box.scrollTop;
+  box.textContent = '';
+  if (!turns.length) { const p = document.createElement('p'); p.className = 'empty'; p.textContent = S.state === 'ready' ? 'Press Start to begin recording.' : 'Waiting for speech…'; box.append(p); }
+  for (const t of turns) {
+    const d = document.createElement('div'); d.className = 'turn' + (t.live ? ' live' : '');
+    const ts = document.createElement('span'); ts.className = 'ts'; ts.textContent = fmt(t.t);
+    const who = document.createElement('span'); who.className = 'who'; who.textContent = t.speaker + ': ';
+    who.style.color = t.speaker === S.me ? 'var(--ok)' : `hsl(${hue(t.speaker)} 65% ${matchMedia('(prefers-color-scheme: dark)').matches ? 68 : 38}%)`;
+    const tx = document.createElement('span'); tx.className = 'txt'; tx.textContent = t.text;
+    d.append(ts, who, tx); box.append(d);
+  }
+  if (follow) box.scrollTop = box.scrollHeight; else box.scrollTop = prevTop;
+}
+function renderNotes(notes) {
+  const box = $('notes'); const stick = nearBottom(box); box.textContent = '';
+  if (!notes.length) { const p = document.createElement('p'); p.className = 'empty'; p.textContent = 'Notes you type appear here.'; box.append(p); }
+  for (const n of notes) {
+    const d = document.createElement('div'); d.className = 'note ' + n.kind;
+    const ts = document.createElement('span'); ts.className = 'ts'; ts.textContent = fmt(n.t); d.append(ts);
+    if (n.kind !== 'note') { const k = document.createElement('span'); k.className = 'kind'; k.textContent = n.label + ':'; d.append(k); }
+    d.append(document.createTextNode(' ' + n.text)); box.append(d);
+  }
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+function renderRoster(s) {
+  const r = $('roster'); r.textContent = ''; r.style.display = s.remote ? '' : 'none'; // solo recording (only you speaking): no speaker row
+  const lab = document.createElement('span'); lab.textContent = s.mode === 'room' ? 'Speaker:' : 'Remote speaker:'; r.append(lab);
+  if (!s.roster.length) { const e = document.createElement('span'); e.textContent = '(none — /add Name, Name · /preset load NAME · /ics FILE)'; r.append(e); }
+  s.roster.forEach((n, i) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'chip' + (s.current === n ? ' on' : ''); b.textContent = (i + 1) + ' ' + n; b.onclick = () => send({ type: 'speaker', name: n }); r.append(b); });
+}
+
+function render(s) {
+  const first = !S; const prev = S; S = { ...(S || {}), ...s };
+  const st = s.state; const el = $('state'); el.textContent = { ready: 'READY', recording: '● REC', paused: '❚❚ PAUSED', stopping: '… SAVING', done: 'DONE' }[st] || st; el.className = 'pill ' + st;
+  $('clock').textContent = fmt(s.clock); $('title').textContent = s.title || 'untitled meeting'; document.title = ($('alerts').querySelector('.mention') ? '🔔 ' : '') + (st === 'recording' ? '● ' : '') + 'MeetBot';
+  const lv = (v) => Math.min(100, Math.sqrt(v || 0) * 100 * 2.2) + '%'; $('mic').style.width = lv(s.levels.mic); $('sys').style.width = lv(s.levels.sys);
+  const l = $('link'); l.textContent = 'Voicegain: ' + s.link; l.className = 'link ' + s.link;
+  $('rec').checked = !!s.record; $('rec').disabled = st !== 'ready'; $('recWrap').style.opacity = st === 'ready' ? 1 : .7;
+  $('catchup').style.display = st === 'recording' || st === 'paused' ? '' : 'none';
+  $('start').style.display = st === 'ready' ? '' : 'none';
+  $('pause').style.display = st === 'recording' || st === 'paused' ? '' : 'none'; $('pause').textContent = st === 'paused' ? 'Resume' : 'Pause';
+  $('stop').style.display = st === 'recording' || st === 'paused' ? '' : 'none';
+  if (s.turns) renderTranscript(S.turns);
+  renderNotes(s.notes); renderRoster(s);
+  if (st === 'stopping' && s.progress) say(s.progress, 'info', 0);
+  else if (s.log && Date.now() - s.log.at < 15000 && (first || !prev.log || prev.log.at !== s.log.at)) say(s.log.text, s.log.level === 'error' ? 'error' : s.log.level === 'warn' ? 'warn' : 'info', 15000);
+  const done = $('done');
+  if (st === 'done' && s.result) {
+    done.style.display = 'block'; done.textContent = '';
+    const h = document.createElement('div'); const b = document.createElement('b'); b.textContent = s.result.draft ? 'Draft saved ' : 'Meeting saved '; const p = document.createElement('code'); p.textContent = s.result.dir; h.append(b, p);
+    const ob = document.createElement('button'); ob.textContent = 'Open folder'; ob.style.marginLeft = '10px'; ob.onclick = () => send({ type: 'line', line: '/open' });
+    const qb = document.createElement('button'); qb.textContent = 'Quit MeetBot'; qb.className = 'primary'; qb.style.marginLeft = '6px'; qb.onclick = () => { send({ type: 'quit' }); done.append(' Closed — you can close this tab.'); };
+    h.append(ob, qb); done.append(h);
+    if (s.result.warning) { const w = document.createElement('div'); w.style.color = 'var(--warn)'; w.textContent = s.result.warning; done.append(w); }
+    if (s.result.draft) { const d = document.createElement('div'); d.style.color = 'var(--accent)'; d.textContent = '⏳ ' + (s.progress || 'Improving the transcript and writing the summary…') + ' The files update automatically; you can leave this window open.'; done.append(d); }
+    const pre = document.createElement('pre'); pre.textContent = s.result.summary || ''; done.append(pre);
+    $('form').style.display = 'none';
+  }
+}
+
+$('transcript').addEventListener('scroll', () => { follow = nearBottom($('transcript')); $('jump').style.display = follow ? 'none' : 'block'; });
+$('jump').onclick = () => { const b = $('transcript'); follow = true; b.scrollTop = b.scrollHeight; $('jump').style.display = 'none'; };
+$('rec').onchange = () => send({ type: 'line', line: $('rec').checked ? '/record on' : '/record off' });
+$('catchup').onclick = () => { say('Catching up…', 'info', 4000); send({ type: 'line', line: '/catchup' }); };
+$('start').onclick = () => send({ type: 'line', line: '/start' });
+$('pause').onclick = () => send({ type: 'line', line: S && S.state === 'paused' ? '/resume' : '/pause' });
+$('stop').onclick = () => { if (confirm('Stop recording and save the meeting?')) send({ type: 'line', line: '/stop' }); };
+$('helpBtn').onclick = () => { const h = $('help'); h.textContent = HELP; h.style.display = h.style.display === 'block' ? 'none' : 'block'; };
+document.querySelectorAll('#kinds button').forEach((b) => { b.onclick = () => { kind = b.dataset.k; syncKinds(); $('input').focus(); }; });
+function syncKinds() { document.querySelectorAll('#kinds button').forEach((b) => b.classList.toggle('on', b.dataset.k === kind)); }
+syncKinds();
+$('form').onsubmit = (e) => {
+  e.preventDefault(); let line = $('input').value.trim(); $('input').value = ''; hpos = -1;
+  if (!line) { if (S && S.state === 'ready') send({ type: 'line', line: '/start' }); return; }
+  if (line === '/help') { $('helpBtn').click(); return; }
+  hist.unshift(line); hist = hist.slice(0, 50);
+  if (kind && !line.startsWith('/')) line = kind + ' ' + line;
+  send({ type: 'line', line });
+};
+$('input').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowUp' && hist.length) { hpos = Math.min(hist.length - 1, hpos + 1); $('input').value = hist[hpos]; e.preventDefault(); }
+  else if (e.key === 'ArrowDown') { hpos = Math.max(-1, hpos - 1); $('input').value = hpos >= 0 ? hist[hpos] : ''; e.preventDefault(); }
+});
+addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key.toLowerCase() === 'k') { e.preventDefault(); $('catchup').click(); }
+  else if (e.ctrlKey && e.key.toLowerCase() === 'p') { e.preventDefault(); $('pause').click(); }
+  else if (e.altKey && /^[1-9]$/.test(e.key) && S && S.roster[+e.key - 1]) { e.preventDefault(); send({ type: 'speaker', name: S.roster[+e.key - 1] }); }
+  else if (e.key === 'Tab' && !$('input').value && S && S.roster.length) { e.preventDefault(); const i = S.roster.indexOf(S.current); send({ type: 'speaker', name: S.roster[(i + (e.shiftKey ? -1 : 1) + S.roster.length) % S.roster.length] }); }
+});
+// App-style popup: park it on the right edge of the screen, narrow, so the meeting window stays visible.
+try { if (!window.opener && matchMedia('(display-mode: standalone), (display-mode: minimal-ui)').matches) { const w = 420, h = Math.min(820, screen.availHeight); window.resizeTo(w, h); window.moveTo(screen.availLeft + screen.availWidth - w, screen.availTop); } } catch (e) { /* not allowed: keep default placement */ }
+connect();
+</script>
+</body>
+</html>
